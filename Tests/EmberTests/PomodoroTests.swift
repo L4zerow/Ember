@@ -1,5 +1,5 @@
 import XCTest
-@testable import SimplexFlame
+@testable import Ember
 
 final class PomodoroTests: XCTestCase {
     func testFreshSessionHasFixedTwentyMinuteDeadline() {

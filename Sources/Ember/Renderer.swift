@@ -18,6 +18,56 @@ struct Uniforms {
     var fieldResolution: SIMD2<Float> = .zero
 }
 
+/// The GPU objects every renderer shares: one device, one command queue, and the shader
+/// compiled once per process. The preview and each display get their own `FlameRenderer`
+/// (own field texture, own clock), but toggling the wallpaper, changing displays, or
+/// starting a Pomodoro break no longer recompiles `Flame.metal` or rebuilds pipelines.
+final class MetalContext {
+    let device: MTLDevice
+    let queue: MTLCommandQueue
+    let pipeline: MTLRenderPipelineState
+    let fieldPipeline: MTLRenderPipelineState
+    let compositePipeline: MTLRenderPipelineState
+
+    private static var cached: MetalContext?
+
+    static func shared() throws -> MetalContext {
+        if let cached { return cached }
+        let context = try MetalContext()
+        cached = context
+        return context
+    }
+
+    private init() throws {
+        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
+            throw NSError(domain: "Ember", code: 1, userInfo: [NSLocalizedDescriptionKey: "A Metal-compatible GPU is required."])
+        }
+        self.device = device
+        self.queue = queue
+        queue.label = "Ember"
+        #if SWIFT_PACKAGE
+        let resources = Bundle.module
+        #else
+        let resources = Bundle.main
+        #endif
+        guard let url = resources.url(forResource: "Flame", withExtension: "metal") else {
+            throw NSError(domain: "Ember", code: 2, userInfo: [NSLocalizedDescriptionKey: "Flame.metal is missing from the app resources."])
+        }
+        let source = try String(contentsOf: url)
+        let library = try device.makeLibrary(source: source, options: nil)
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = library.makeFunction(name: "fullscreenVertex")
+        descriptor.fragmentFunction = library.makeFunction(name: "flameFragment")
+        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        descriptor.fragmentFunction = library.makeFunction(name: "compositeFragment")
+        compositePipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        descriptor.fragmentFunction = library.makeFunction(name: "fieldFragment")
+        descriptor.colorAttachments[0].pixelFormat = .r32Float
+        fieldPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    }
+}
+
 final class FlameRenderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let queue: MTLCommandQueue
@@ -32,33 +82,14 @@ final class FlameRenderer: NSObject, MTKViewDelegate {
     private let inFlight = DispatchSemaphore(value: 3)
 
     init(settings: Settings, reference: Bool = false) throws {
-        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
-            throw NSError(domain: "SimplexFlame", code: 1, userInfo: [NSLocalizedDescriptionKey: "A Metal-compatible GPU is required."])
-        }
-        self.device = device
-        self.queue = queue
+        let context = try MetalContext.shared()
+        device = context.device
+        queue = context.queue
+        pipeline = context.pipeline
+        fieldPipeline = context.fieldPipeline
+        compositePipeline = context.compositePipeline
         self.settings = settings
         self.reference = reference
-        #if SWIFT_PACKAGE
-        let resources = Bundle.module
-        #else
-        let resources = Bundle.main
-        #endif
-        guard let url = resources.url(forResource: "Flame", withExtension: "metal") else {
-            throw NSError(domain: "SimplexFlame", code: 2, userInfo: [NSLocalizedDescriptionKey: "Flame.metal is missing from the app resources."])
-        }
-        let source = try String(contentsOf: url)
-        let library = try device.makeLibrary(source: source, options: nil)
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = library.makeFunction(name: "fullscreenVertex")
-        descriptor.fragmentFunction = library.makeFunction(name: "flameFragment")
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
-        pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
-        descriptor.fragmentFunction = library.makeFunction(name: "compositeFragment")
-        compositePipeline = try device.makeRenderPipelineState(descriptor: descriptor)
-        descriptor.fragmentFunction = library.makeFunction(name: "fieldFragment")
-        descriptor.colorAttachments[0].pixelFormat = .r32Float
-        fieldPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         super.init()
     }
 
@@ -160,7 +191,7 @@ final class FlameRenderer: NSObject, MTKViewDelegate {
                 if let error = command.error { throw error }
                 if frame >= 12 {
                     let milliseconds = (command.gpuEndTime-command.gpuStartTime)*1000
-                    guard milliseconds > 0 else { throw NSError(domain: "SimplexFlame",code: 3,userInfo: [NSLocalizedDescriptionKey:"GPU timestamps unavailable."]) }
+                    guard milliseconds > 0 else { throw NSError(domain: "Ember",code: 3,userInfo: [NSLocalizedDescriptionKey:"GPU timestamps unavailable."]) }
                     durations.append(milliseconds)
                 }
             }

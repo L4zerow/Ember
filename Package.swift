@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "SimplexFlame",
+    name: "Ember",
     platforms: [.macOS(.v13)],
-    products: [.executable(name: "SimplexFlame", targets: ["SimplexFlame"])],
+    products: [.executable(name: "Ember", targets: ["Ember"])],
     targets: [
-        .executableTarget(name: "SimplexFlame", resources: [.copy("Flame.metal")]),
-        .testTarget(name: "SimplexFlameTests", dependencies: ["SimplexFlame"])
+        .executableTarget(name: "Ember", resources: [.copy("Flame.metal")]),
+        .testTarget(name: "EmberTests", dependencies: ["Ember"])
     ]
 )

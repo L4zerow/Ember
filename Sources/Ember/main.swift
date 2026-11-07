@@ -3,6 +3,11 @@ import MetalKit
 
 final class DesktopWindow: NSWindow {
     var presentsPomodoro = false
+    /// The window server reports a new window as occluded for its first few milliseconds.
+    /// Only trust "covered" once it has reported visible, so a missing notification can
+    /// never leave the wallpaper paused before its first frame.
+    var hasBeenVisible = false
+    var isCovered: Bool { hasBeenVisible && !occlusionState.contains(.visible) }
     override var canBecomeKey: Bool { presentsPomodoro }
     override var canBecomeMain: Bool { false }
 }
@@ -50,7 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             buildMenu()
             buildPreview()
             observeSystem()
-            showPreview()
+            // Reopen straight into wallpaper mode if it was on when the app last quit.
+            if defaults.bool(forKey: "wallpaperEnabled") { setWallpaper(enabled: true) } else { showPreview() }
         } catch {
             NSAlert(error: error).runModal()
             NSApp.terminate(nil)
@@ -66,15 +72,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appPomodoro.target = self
         pomodoroMenuItems.append(appPomodoro)
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit SimplexFlame", action: #selector(quit), keyEquivalent: "q").target = self
+        appMenu.addItem(withTitle: "Quit Ember", action: #selector(quit), keyEquivalent: "q").target = self
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "flame.fill", accessibilityDescription: "SimplexFlame")
+        statusItem.button?.image = NSImage(systemSymbolName: "flame.fill", accessibilityDescription: "Ember")
         let menu = NSMenu()
-        menu.addItem(withTitle: "SimplexFlame", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Ember", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Show Preview & Controls…", action: #selector(showPreview), keyEquivalent: "").target = self
         wallpaperMenuItem = menu.addItem(withTitle: "Enable Wallpaper", action: #selector(toggleWallpaper), keyEquivalent: "")
@@ -86,13 +92,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pomodoroMenuItem.target = self
         pomodoroMenuItems.append(pomodoroMenuItem)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit SimplexFlame", action: #selector(quit), keyEquivalent: "q").target = self
+        menu.addItem(withTitle: "Quit Ember", action: #selector(quit), keyEquivalent: "q").target = self
         statusItem.menu = menu
     }
 
     func buildPreview() {
         preview = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1060,height: 780), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
-        preview.title = "SimplexFlame"
+        preview.title = "Ember"
         preview.subtitle = "Living gradients · Metal"
         preview.minSize = NSSize(width: 960,height: 540)
         preview.isReleasedWhenClosed = false
@@ -190,9 +196,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateRendering()
     }
 
-    @objc func toggleWallpaper() {
+    @objc func toggleWallpaper() { setWallpaper(enabled: !wallpaperEnabled) }
+
+    func setWallpaper(enabled: Bool) {
         if pomodoro.isOnBreak { finishPomodoroBreak() }
-        wallpaperEnabled.toggle()
+        wallpaperEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "wallpaperEnabled")
         rebuildDesktops()
         wallpaperButton.title = wallpaperEnabled ? "Stop Wallpaper" : "Use as Wallpaper"
         wallpaperMenuItem.title = wallpaperEnabled ? "Disable Wallpaper" : "Enable Wallpaper"
@@ -338,7 +347,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func updateRendering() {
         let pause = settings.paused || settings.speed == 0 || displayAsleep
         previewView?.isPaused = pause || !preview.isVisible || !preview.occlusionState.contains(.visible)
-        for (_,view,_) in desktops { view.isPaused = pause }
+        // A desktop fully hidden behind other windows (or a full-screen app) stops rendering
+        // and resumes where it left off as soon as any part of it shows again.
+        for (window,view,_) in desktops { view.isPaused = pause || (window as? DesktopWindow)?.isCovered == true }
     }
 
     func updateAppearance() {
@@ -356,6 +367,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         observers.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,object: nil,queue: .main) { [weak self] _ in
             self?.rebuildDesktops()
             if let self = self { self.previewRenderer.resize(self.previewView) }
+        })
+        observers.append(center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,object: nil,queue: .main) { [weak self] note in
+            guard let window = note.object as? DesktopWindow else { return }
+            if window.occlusionState.contains(.visible) { window.hasBeenVisible = true }
+            self?.updateRendering()
         })
         for name in [NSWorkspace.screensDidSleepNotification,NSWorkspace.willSleepNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name,object: nil,queue: .main) { [weak self] _ in self?.displayAsleep = true; self?.updateRendering() })

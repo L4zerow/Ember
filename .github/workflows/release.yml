@@ -35,20 +35,20 @@ jobs:
         run: |
           version="${TAG_NAME#v}"
           if [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
-            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" dist/SimplexFlame.app/Contents/Info.plist
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" dist/Ember.app/Contents/Info.plist
           fi
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" dist/SimplexFlame.app/Contents/Info.plist
-          codesign --force --deep --sign - dist/SimplexFlame.app
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" dist/Ember.app/Contents/Info.plist
+          codesign --force --deep --sign - dist/Ember.app
 
       - name: Verify and package app
         run: |
-          codesign --verify --deep --strict dist/SimplexFlame.app
-          lipo dist/SimplexFlame.app/Contents/MacOS/SimplexFlame -verify_arch x86_64 arm64
-          ditto -c -k --sequesterRsrc --keepParent dist/SimplexFlame.app SimplexFlame-macOS.zip
-          shasum -a 256 SimplexFlame-macOS.zip > SimplexFlame-macOS.zip.sha256
+          codesign --verify --deep --strict dist/Ember.app
+          lipo dist/Ember.app/Contents/MacOS/Ember -verify_arch x86_64 arm64
+          ditto -c -k --sequesterRsrc --keepParent dist/Ember.app Ember-macOS.zip
+          shasum -a 256 Ember-macOS.zip > Ember-macOS.zip.sha256
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG_NAME" SimplexFlame-macOS.zip SimplexFlame-macOS.zip.sha256 --clobber
+        run: gh release upload "$TAG_NAME" Ember-macOS.zip Ember-macOS.zip.sha256 --clobber
