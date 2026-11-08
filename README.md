@@ -29,6 +29,21 @@ The preview window has flow speed, grain, and brightness sliders; settings are r
 
 Check **Pomodoro · 20 Minutes** in the flame menu to enable repeating breaks. After 20 minutes of normal work, a fullscreen splash over the animated wallpaper on every display counts down from 30 seconds to zero, then returns to the previous mode and starts the next 20-minute interval. Double-click anywhere or press Escape to skip a break. Uncheck the menu item to stop the cycle. Sleep counts toward the interval; a break that becomes due during sleep appears on wake.
 
+## Energy
+
+Ember picks its own frame rate; there is nothing to set.
+
+| Situation | What Ember does |
+|---|---|
+| Plugged in, most of the desktop showing | 30 fps |
+| On battery, or windows and widgets hide more than half of the desktop | 15 fps |
+| Only slivers of desktop showing (under 5%), or Low Power Mode is on | no frames drawn |
+| Desktop fully covered, full-screen app in front, Space not showing, display asleep | no frames drawn |
+
+A frame costs about the same however little of the desktop is visible, so drawing fewer frames is where the saving is. The flame's clock only advances when a frame is drawn, so changing tier never makes it jump; a paused flame simply continues from where it stopped. Coverage is estimated once a second from the window server's list of on-screen windows (window bounds, so rounded corners and shadows are ignored, and translucent desktop widgets count as cover). On an M5 Max the whole thing is under 1% of the GPU and about 1.5% of one CPU core at 30 fps (a little more on battery, where the cores clock lower), roughly a third less at 15 fps, and nothing when paused.
+
+`defaults write local.ember.wallpaper adaptiveFrameRate -bool false` keeps 30 fps whenever any part of the desktop shows, whatever the power source.
+
 ## Render a still
 
 ```sh
@@ -60,6 +75,6 @@ On an M5 Max the two-pass renderer takes about 0.23 ms of GPU time per frame at 
 - 30 fps with output matching each screen's full backing resolution, including Retina scaling.
 - Two render passes: calculate the smooth scalar flame field at one quarter of the output width/height, then interpolate it and apply the palette and grain at full output resolution. Only the internal smooth field is approximated; the finished image is not upscaled. A padded border preserves interpolation at screen edges.
 - One Metal device, command queue, and compiled shader per process (`MetalContext`), shared by the preview and every display. Toggling the wallpaper, changing displays, or starting a break never recompiles the shader.
-- Each desktop window pauses rendering while it is fully covered by other windows, while its Space is not showing, or while a full-screen app is in front, and resumes where it left off when any part of it shows again. Rendering also pauses on display/system sleep and manual pause; hidden/occluded previews stop rendering.
+- Each desktop window pauses rendering while it is fully covered by other windows, while its Space is not showing, or while a full-screen app is in front, and resumes where it left off when any part of it shows again. See Energy above for the frame-rate tiers. Rendering also pauses on display/system sleep and manual pause; hidden/occluded previews stop rendering.
 - One click-through desktop-level window per display *per Space*. A window shared by all Spaces is composited beneath the Space-switch animation, so the system wallpaper showed for about half a second whenever a full-screen app opened or closed. A window that belongs to its Space slides with the desktop instead. Windows are made lazily: the first time a desktop Space shows on a screen it gets one (that one first visit still shows the system wallpaper during the slide); full-screen Spaces never get one, which Ember tells apart by the absence of the desktop-picture and desktop-icon windows from the on-screen window list. Windows rebuild when displays change. `defaults write local.ember.wallpaper desktopsOnAllSpaces -bool true` restores the single shared window.
 - Pomodoro reuses the wallpaper views and adds an AppKit text overlay updated once per second during breaks. Work intervals use a single scheduled timer. When disabled there is no running timer or overlay.

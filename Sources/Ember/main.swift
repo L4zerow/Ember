@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.ps
 import MetalKit
 
 final class DesktopWindow: NSWindow {
@@ -9,6 +10,8 @@ final class DesktopWindow: NSWindow {
     /// Only trust "covered" once it has reported visible, so a missing notification can
     /// never leave the wallpaper paused before its first frame.
     var hasBeenVisible = false
+    /// How much of this desktop is not hidden behind windows or widgets, 0...1, refreshed every two seconds.
+    var visibleFraction = 1.0
     /// Covered by other windows, or left behind on a Space that is not showing.
     var isCovered: Bool { (hasBeenVisible && !occlusionState.contains(.visible)) || (!presentsPomodoro && !isOnActiveSpace) }
     override var canBecomeKey: Bool { presentsPomodoro }
@@ -46,6 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var previousPresentationOptions: NSApplication.PresentationOptions = []
     var valueLabels: [Int: NSTextField] = [:]
     var observers: [NSObjectProtocol] = []
+    var onBattery = false
+    var lowPowerMode = false
+    var visibilityTimer: Timer?
+    static let fullFrameRate = 30, reducedFrameRate = 15
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -424,8 +431,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let pause = settings.paused || settings.speed == 0 || displayAsleep
         previewView?.isPaused = pause || !preview.isVisible || !preview.occlusionState.contains(.visible)
         // A desktop fully hidden behind other windows (or a full-screen app) stops rendering
-        // and resumes where it left off as soon as any part of it shows again.
-        for (window,view,_) in desktops { view.isPaused = pause || (window as? DesktopWindow)?.isCovered == true }
+        // and resumes where it left off as soon as any part of it shows again. A frame costs
+        // about the same however little of the desktop shows, so the rest of the saving comes
+        // from drawing less often: half rate on battery or when windows hide more than half
+        // of the desktop, and no frames at all in Low Power Mode or when only slivers show.
+        // The flame's clock only advances when a frame is drawn, so none of this ever jumps.
+        for (window,view,_) in desktops {
+            let desktop = window as? DesktopWindow
+            let adaptive = adaptiveFrameRate && desktop?.presentsPomodoro != true
+            let visible = desktop?.visibleFraction ?? 1
+            let paused = pause || desktop?.isCovered == true || (adaptive && (lowPowerMode || visible < 0.05))
+            let rate = adaptive && (onBattery || visible < 0.5) ? Self.reducedFrameRate : Self.fullFrameRate
+            if view.preferredFramesPerSecond != rate { view.preferredFramesPerSecond = rate }
+            if view.isPaused != paused { view.isPaused = paused }
+        }
+        scheduleVisibilityPolling()
+    }
+
+    /// `defaults write local.ember.wallpaper adaptiveFrameRate -bool false` keeps 30 fps whenever any
+    /// part of the desktop shows, whatever the power source.
+    var adaptiveFrameRate: Bool {
+        UserDefaults.standard.object(forKey: "adaptiveFrameRate") == nil || UserDefaults.standard.bool(forKey: "adaptiveFrameRate")
+    }
+
+    func scheduleVisibilityPolling() {
+        if desktops.isEmpty || !adaptiveFrameRate {
+            visibilityTimer?.invalidate()
+            visibilityTimer = nil
+        } else if visibilityTimer == nil {
+            // Reading the window list costs about a millisecond; every two seconds is plenty.
+            let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.pollVisibility() }
+            timer.tolerance = 0.5
+            visibilityTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            pollVisibility()
+        }
+    }
+
+    func pollVisibility() {
+        guard !desktops.isEmpty else { return }
+        var changed = false
+        let battery = Self.isOnBattery(), lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+        if battery != onBattery || lowPower != lowPowerMode { onBattery = battery; lowPowerMode = lowPower; changed = true }
+        if !displayAsleep {
+            var list: [[String: Any]]?
+            for (window,_,_) in desktops {
+                guard let desktop = window as? DesktopWindow, desktop.isOnActiveSpace, !desktop.isCovered, !desktop.presentsPomodoro else { continue }
+                if list == nil { list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [] }
+                let fraction = Self.visibleFraction(of: desktop.homeFrame, windows: list ?? [])
+                if abs(fraction - desktop.visibleFraction) > 0.01 { desktop.visibleFraction = fraction; changed = true }
+            }
+        }
+        if changed { updateRendering() }
+    }
+
+    static func isOnBattery() -> Bool {
+        guard let source = IOPSGetProvidingPowerSourceType(nil)?.takeUnretainedValue() else { return false }
+        return (source as String) != kIOPMACPowerKey
+    }
+
+    /// The share of a screen not covered by ordinary windows or desktop widgets, from the window
+    /// server's list of on-screen windows. Window bounds ignore rounded corners and shadows, and
+    /// translucent widgets count as cover (their blur hides frame rate anyway). The area is sampled
+    /// on a 64 by 40 grid; the answer only picks a frame-rate tier, so that precision is plenty.
+    static func visibleFraction(of frame: NSRect, windows: [[String: Any]]) -> Double {
+        guard let primary = NSScreen.screens.first else { return 1 }
+        let screen = CGRect(x: frame.minX, y: primary.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
+        let ownPID = Int(ProcessInfo.processInfo.processIdentifier)
+        var covers: [CGRect] = []
+        for info in windows {
+            guard (info[kCGWindowOwnerPID as String] as? Int) != ownPID,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"], let width = bounds["Width"], let height = bounds["Height"] else { continue }
+            // Normal windows through modal panels, plus Notification Center's desktop widgets. Menu bar
+            // and system overlays above that range are transparent full-screen windows, not cover.
+            let isWindow = layer >= Int(CGWindowLevelForKey(.normalWindow)) && layer <= Int(CGWindowLevelForKey(.modalPanelWindow))
+            let isWidget = layer < 0 && (info[kCGWindowOwnerName as String] as? String) == "Notification Center"
+            guard isWindow || isWidget else { continue }
+            let cover = CGRect(x: x, y: y, width: width, height: height).intersection(screen)
+            if !cover.isEmpty { covers.append(cover) }
+        }
+        if covers.isEmpty { return 1 }
+        let columns = 64, rows = 40
+        var covered = 0
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let point = CGPoint(x: screen.minX + (CGFloat(column) + 0.5) * screen.width / CGFloat(columns),
+                                    y: screen.minY + (CGFloat(row) + 0.5) * screen.height / CGFloat(rows))
+                if covers.contains(where: { $0.contains(point) }) { covered += 1 }
+            }
+        }
+        return 1 - Double(covered) / Double(columns * rows)
     }
 
     func updateAppearance() {
