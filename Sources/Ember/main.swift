@@ -3,11 +3,14 @@ import MetalKit
 
 final class DesktopWindow: NSWindow {
     var presentsPomodoro = false
+    /// The screen this window was made for. Screens are matched by frame; a display change rebuilds everything.
+    var homeFrame = NSRect.zero
     /// The window server reports a new window as occluded for its first few milliseconds.
     /// Only trust "covered" once it has reported visible, so a missing notification can
     /// never leave the wallpaper paused before its first frame.
     var hasBeenVisible = false
-    var isCovered: Bool { hasBeenVisible && !occlusionState.contains(.visible) }
+    /// Covered by other windows, or left behind on a Space that is not showing.
+    var isCovered: Bool { (hasBeenVisible && !occlusionState.contains(.visible)) || (!presentsPomodoro && !isOnActiveSpace) }
     override var canBecomeKey: Bool { presentsPomodoro }
     override var canBecomeMain: Bool { false }
 }
@@ -215,35 +218,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for (window,view,_) in desktops { view.isPaused = true; window.close() }
         desktops.removeAll()
         guard wallpaperEnabled || pomodoro.isOnBreak else { return }
+        ensureDesktops()
+        if pomodoro.isOnBreak { presentPomodoro() }
+        updateRendering()
+    }
+
+    /// Set `defaults write local.ember.wallpaper desktopsOnAllSpaces -bool true` to go back to one
+    /// window per screen shared by every Space, as the original app did.
+    var perSpaceDesktops: Bool { !UserDefaults.standard.bool(forKey: "desktopsOnAllSpaces") }
+
+    var desktopCollectionBehavior: NSWindow.CollectionBehavior {
+        perSpaceDesktops ? [.stationary, .ignoresCycle] : [.canJoinAllSpaces, .stationary, .ignoresCycle]
+    }
+
+    /// Each desktop window belongs to a single Space, so it slides with that desktop, above the
+    /// system wallpaper, when a Space or a full-screen app animates in or out. A window shared by
+    /// all Spaces is composited beneath that animation, which shows the system wallpaper for the
+    /// length of the transition. Windows are made lazily: the first time a desktop Space shows on a
+    /// screen, that Space gets one, and it keeps it until the display configuration changes.
+    func ensureDesktops() {
+        guard wallpaperEnabled || pomodoro.isOnBreak else { return }
+        let perSpace = perSpaceDesktops
         do {
             for screen in NSScreen.screens {
-                let renderer = try FlameRenderer(settings: settings)
-                let window = DesktopWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false, screen: screen)
-                window.isReleasedWhenClosed = false
-                window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow))+1)
-                window.collectionBehavior = [.canJoinAllSpaces,.stationary,.ignoresCycle]
-                window.ignoresMouseEvents = true
-                window.hasShadow = false
-                window.isOpaque = true
-                window.backgroundColor = .black
-                window.hidesOnDeactivate = false
-                let view = renderer.makeView(frame: NSRect(origin: .zero,size: screen.frame.size))
-                view.autoresizingMask = [.width,.height]
-                window.contentView = view
-                window.setFrame(screen.frame,display: true)
-                window.orderFrontRegardless()
-                renderer.resize(view)
-                desktops.append((window,view,renderer))
-                if settings.paused || settings.speed == 0 { view.draw() }
+                let mine = desktops.map(\.0).filter { ($0 as? DesktopWindow)?.homeFrame == screen.frame }
+                let present = mine.filter { !perSpace || $0.isOnActiveSpace }
+                    .sorted { ($0 as? DesktopWindow)?.presentsPomodoro == true && ($1 as? DesktopWindow)?.presentsPomodoro != true }
+                if perSpace {
+                    // A Space that closes hands its windows to another Space: keep one per Space.
+                    for extra in present.dropFirst() { closeDesktop(extra) }
+                    if mine.count > 6, let spare = mine.first(where: { !$0.isOnActiveSpace }) { closeDesktop(spare) }
+                }
+                // A break splash is raised above everything, so it may be made in any Space.
+                guard present.isEmpty, pomodoro.isOnBreak || !perSpace || desktopSpaceIsActive(on: screen) else { continue }
+                try makeDesktop(for: screen)
             }
         } catch {
             if pomodoro.isActive { stopPomodoro() }
-            wallpaperEnabled = false
-            rebuildDesktops()
+            setWallpaper(enabled: false)
             NSAlert(error: error).runModal()
         }
-        if pomodoro.isOnBreak { presentPomodoro() }
-        updateRendering()
+    }
+
+    func makeDesktop(for screen: NSScreen) throws {
+        let renderer = try FlameRenderer(settings: settings)
+        let window = DesktopWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false, screen: screen)
+        window.homeFrame = screen.frame
+        window.isReleasedWhenClosed = false
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow))+1)
+        window.collectionBehavior = desktopCollectionBehavior
+        window.ignoresMouseEvents = true
+        window.hasShadow = false
+        window.isOpaque = true
+        window.backgroundColor = .black
+        window.hidesOnDeactivate = false
+        let view = renderer.makeView(frame: NSRect(origin: .zero,size: screen.frame.size))
+        view.autoresizingMask = [.width,.height]
+        window.contentView = view
+        window.setFrame(screen.frame,display: true)
+        window.orderFrontRegardless()
+        renderer.resize(view)
+        desktops.append((window,view,renderer))
+        if settings.paused || settings.speed == 0 { view.draw() }
+    }
+
+    func closeDesktop(_ window: NSWindow) {
+        guard let index = desktops.firstIndex(where: { $0.0 === window }) else { return }
+        let (window, view, _) = desktops.remove(at: index)
+        pomodoroOverlays.removeAll { $0.superview === view }
+        view.isPaused = true
+        window.close()
+    }
+
+    /// A full-screen Space has no desktop: the per-Space windows that draw the desktop picture and
+    /// the desktop icons are missing from the on-screen window list while one is showing, and only
+    /// system windows that live on every Space (WindowManager, Window Server) remain at desktop levels.
+    func desktopSpaceIsActive(on screen: NSScreen) -> Bool {
+        guard let primary = NSScreen.screens.first,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return true }
+        let target = CGRect(x: screen.frame.minX, y: primary.frame.maxY - screen.frame.maxY, width: screen.frame.width, height: screen.frame.height)
+        let ownPID = Int(ProcessInfo.processInfo.processIdentifier)
+        for info in list {
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer <= Int(CGWindowLevelForKey(.desktopIconWindow)),
+                  (info[kCGWindowOwnerPID as String] as? Int) != ownPID,
+                  let owner = info[kCGWindowOwnerName as String] as? String, owner != "WindowManager", owner != "Window Server",
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"], let width = bounds["Width"], let height = bounds["Height"],
+                  CGRect(x: x, y: y, width: width, height: height).contains(target) else { continue }
+            return true
+        }
+        return false
+    }
+
+    /// One window per screen for the break splash: the one already presenting it, else the one on
+    /// the showing Space, else any.
+    func breakWindows() -> [(NSWindow, MTKView, FlameRenderer)] {
+        NSScreen.screens.compactMap { screen in
+            let mine = desktops.filter { ($0.0 as? DesktopWindow)?.homeFrame == screen.frame }
+            return mine.first { ($0.0 as? DesktopWindow)?.presentsPomodoro == true } ?? mine.first { $0.0.isOnActiveSpace } ?? mine.first
+        }
     }
 
     @objc func togglePomodoro() {
@@ -269,8 +342,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         previousPresentationOptions = NSApp.presentationOptions
         pomodoro.startBreak()
         preview.orderOut(nil)
-        if desktops.isEmpty { rebuildDesktops() } else { presentPomodoro() }
+        ensureDesktops()
         guard pomodoro.isActive else { return }
+        presentPomodoro()
         schedulePomodoroTimer()
         updateRendering()
     }
@@ -280,7 +354,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pomodoroOverlays.removeAll()
         NSApp.activate(ignoringOtherApps: true)
         NSApp.presentationOptions = [.autoHideDock, .autoHideMenuBar]
-        for (window, view, _) in desktops {
+        let presenting = breakWindows()
+        for (window, view, _) in presenting {
             (window as? DesktopWindow)?.presentsPomodoro = true
             // Cover normal windows and the Dock, but allow the menu bar to reveal on hover.
             window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) - 1)
@@ -294,7 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.orderFrontRegardless()
             window.makeFirstResponder(overlay)
         }
-        desktops.first?.0.makeKey()
+        presenting.first?.0.makeKey()
     }
 
     func updatePomodoro() {
@@ -328,14 +403,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for overlay in pomodoroOverlays { overlay.removeFromSuperview() }
         pomodoroOverlays.removeAll()
         NSApp.presentationOptions = previousPresentationOptions
-        for (window, _, _) in desktops {
+        for (window, _, _) in desktops where (window as? DesktopWindow)?.presentsPomodoro == true {
             window.resignKey()
             (window as? DesktopWindow)?.presentsPomodoro = false
             window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+            // Leaving "all Spaces" puts the window on the Space showing now; ensureDesktops drops any duplicate.
+            window.collectionBehavior = desktopCollectionBehavior
             window.ignoresMouseEvents = true
         }
-        if !wallpaperEnabled { rebuildDesktops() }
+        if wallpaperEnabled { ensureDesktops() } else { rebuildDesktops() }
         if previewWasVisible { preview.orderFront(nil) }
         if NSApp.isActive, previousApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             previousApplication?.activate(options: [])
@@ -371,6 +447,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         observers.append(center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,object: nil,queue: .main) { [weak self] note in
             guard let window = note.object as? DesktopWindow else { return }
             if window.occlusionState.contains(.visible) { window.hasBeenVisible = true }
+            self?.updateRendering()
+        })
+        // A Space change ends when its animation ends: give a desktop Space seen for the first time
+        // its window, and resume the one that just came back into view.
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,object: nil,queue: .main) { [weak self] _ in
+            self?.ensureDesktops()
             self?.updateRendering()
         })
         for name in [NSWorkspace.screensDidSleepNotification,NSWorkspace.willSleepNotification] {
