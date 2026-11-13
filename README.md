@@ -20,12 +20,14 @@ open dist/Ember.app
 - **On:** open the app and click **Use as Wallpaper**, or pick **Enable Wallpaper** from the flame icon in the menu bar.
 - **Off:** pick **Disable Wallpaper** from the flame menu. Your normal wallpaper is underneath and reappears at once.
 - **Quit:** **Quit Ember** from the flame menu also reveals the normal wallpaper.
+- **After a restart:** turn on **Open at Login** in the flame menu once, and Ember comes back by itself with the wallpaper on.
+  From a script: `dist/Ember.app/Contents/MacOS/Ember --open-at-login on` (or `off`).
 
 Ember remembers whether the wallpaper was on. If you quit with it on, the next launch goes straight to wallpaper mode with no preview window; use the flame menu to reach the controls.
 
 ## Controls
 
-The preview window has flow speed, grain, and brightness sliders; settings are remembered. Day and night palettes follow the macOS appearance setting automatically. Click **Use as Wallpaper** to place the animation behind desktop icons on each connected screen. Use the flame menu-bar icon to reopen controls, pause, disable the wallpaper, or quit. It does not install a login item or change the system wallpaper image.
+The preview window has flow speed, grain, and brightness sliders; settings are remembered. Day and night palettes follow the macOS appearance setting automatically. Click **Use as Wallpaper** to place the animation behind desktop icons on each connected screen. Use the flame menu-bar icon to reopen controls, pause, disable the wallpaper, or quit. It does not change the system wallpaper image. **Open at Login** in the flame menu is off until you turn it on; it registers a standard login item for Ember.app at its current location (visible under System Settings > General > Login Items), so if you move the app, turn it off and on again.
 
 Check **Pomodoro · 20 Minutes** in the flame menu to enable repeating breaks. After 20 minutes of normal work, a fullscreen splash over the animated wallpaper on every display counts down from 30 seconds to zero, then returns to the previous mode and starts the next 20-minute interval. Double-click anywhere or press Escape to skip a break. Uncheck the menu item to stop the cycle. Sleep counts toward the interval; a break that becomes due during sleep appears on wake.
 

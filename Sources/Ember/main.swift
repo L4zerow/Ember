@@ -1,6 +1,7 @@
 import AppKit
 import IOKit.ps
 import MetalKit
+import ServiceManagement
 
 final class DesktopWindow: NSWindow {
     var presentsPomodoro = false
@@ -27,7 +28,7 @@ final class AppearanceTrackingView: NSView {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     let settings = Settings()
     var preview: NSWindow!
     var previewRenderer: FlameRenderer!
@@ -40,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var pauseButton: NSButton!
     var wallpaperMenuItem: NSMenuItem!
     var pauseMenuItem: NSMenuItem!
+    var loginMenuItem: NSMenuItem!
     var pomodoroMenuItems: [NSMenuItem] = []
     var pomodoro = PomodoroSession()
     var pomodoroTimer: Timer?
@@ -101,8 +103,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let pomodoroMenuItem = menu.addItem(withTitle: "Pomodoro · 20 Minutes", action: #selector(togglePomodoro), keyEquivalent: "")
         pomodoroMenuItem.target = self
         pomodoroMenuItems.append(pomodoroMenuItem)
+        loginMenuItem = menu.addItem(withTitle: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
+        loginMenuItem.target = self
+        updateLoginMenuItem()
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Ember", action: #selector(quit), keyEquivalent: "q").target = self
+        menu.delegate = self
         statusItem.menu = menu
     }
 
@@ -207,6 +213,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func toggleWallpaper() { setWallpaper(enabled: !wallpaperEnabled) }
+
+    /// A standard login item for this app bundle, listed under System Settings > General > Login Items.
+    /// It points at the bundle's current location, so moving Ember.app means turning this off and on again.
+    @objc func toggleOpenAtLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() }
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+        updateLoginMenuItem()
+    }
+
+    func updateLoginMenuItem() {
+        let status = SMAppService.mainApp.status
+        loginMenuItem.state = status == .enabled ? .on : .off
+        // .requiresApproval: the user turned it off in System Settings; the menu offers to open them.
+        loginMenuItem.title = status == .requiresApproval ? "Open at Login (approve in System Settings)" : "Open at Login"
+    }
 
     func setWallpaper(enabled: Bool) {
         if pomodoro.isOnBreak { finishPomodoroBreak() }
@@ -566,6 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowDidChangeOcclusionState(_ notification: Notification) { updateRendering() }
     func windowWillClose(_ notification: Notification) { previewView.isPaused = true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func menuNeedsUpdate(_ menu: NSMenu) { updateLoginMenuItem() }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showPreview()
         return true
@@ -577,6 +602,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+if let index = CommandLine.arguments.firstIndex(of: "--open-at-login"), CommandLine.arguments.count > index+1 {
+    // `Ember --open-at-login on|off`: the same login item the flame menu toggles, from a script.
+    do {
+        if CommandLine.arguments[index+1] == "on" { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        print("Open at Login: \(SMAppService.mainApp.status == .enabled ? "on" : "off")")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+}
 if let index = CommandLine.arguments.firstIndex(of: "--snapshot"), CommandLine.arguments.count > index+1 {
     do {
         let settings = Settings()
